@@ -22,7 +22,7 @@
     error = '';
     loading = true;
     try {
-      // RLS should ensure user sees only their messages via join on aliases
+      // RLS on email_messages.user_id ensures the user sees only their messages
       const { data, error: err } = await supabase
         .from('email_messages')
         .select('*')
