@@ -13,6 +13,10 @@
 	{#if $authUser}
 		<span>Signed in as {$authUser.email}</span>
 		<button on:click={signOut}>Sign out</button>
+		<nav>
+			<a href="/aliases">Aliases</a>
+			<a href="/messages">Messages</a>
+		</nav>
 	{:else}
 		<a href="/signin">Sign in</a>
 	{/if}
