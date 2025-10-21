@@ -49,33 +49,44 @@
   /**
    * For each message, attempt to locate its attachments in the storage bucket
    * under a folder named by the message id, and create signed download URLs.
+   * Batches all requests for better performance.
    * @param {Message[]} msgs
    */
   async function populateSignedUrls(msgs) {
+    // Collect all paths that need signed URLs
+    /** @type {Array<{message: Message, attachment: Attachment, path: string}>} */
+    const pathsToSign = [];
+
     for (const m of msgs) {
       if (!m.id || !m.attachments || m.attachments.length === 0) continue;
       const userId = /** @type {string | undefined} */ (m.user_id) || $authUser?.id;
       if (!userId) continue;
       const folder = `${userId}/${m.id}`;
-      const { data: objects, error: listErr } = await supabase
-        .storage
-        .from(attachmentsBucket)
-        .list(folder, { limit: 1000 });
-      if (listErr || !objects) continue;
-      const objectNames = new Set(objects.map((o) => o.name));
 
       for (const a of m.attachments) {
         const name = resolveAttachmentName(a);
-        if (!name || !objectNames.has(name)) continue;
+        if (!name) continue;
         const objectPath = `${folder}/${name}`;
-        const { data: signed, error: signErr } = await supabase
-          .storage
-          .from(attachmentsBucket)
-          .createSignedUrl(objectPath, 3600);
-        if (!signErr && signed && signed.signedUrl) {
-          a.signedUrl = signed.signedUrl;
-        }
+        pathsToSign.push({ message: m, attachment: a, path: objectPath });
       }
+    }
+
+    // Create signed URLs in parallel batches of 20 to avoid overwhelming the API
+    const batchSize = 20;
+    for (let i = 0; i < pathsToSign.length; i += batchSize) {
+      const batch = pathsToSign.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map(({ path }) =>
+          supabase.storage.from(attachmentsBucket).createSignedUrl(path, 3600)
+        )
+      );
+
+      // Assign the signed URLs back to the attachments
+      results.forEach((result, idx) => {
+        if (result.status === 'fulfilled' && result.value.data?.signedUrl) {
+          batch[idx].attachment.signedUrl = result.value.data.signedUrl;
+        }
+      });
     }
   }
 
