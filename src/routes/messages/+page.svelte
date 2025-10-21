@@ -344,9 +344,19 @@
               {#each m.attachments as a}
                 <li>
                   {#if a.signedUrl}
-                    <a href={a.signedUrl} target="_blank" rel="noopener" download>
-                      {resolveAttachmentName(a)}
-                    </a>
+                    {#if a.content_type?.startsWith('image/')}
+                      <div>
+                        <img src={a.signedUrl} alt={resolveAttachmentName(a)} style="max-width: 300px; max-height: 300px;" />
+                        <br>
+                        <a href={a.signedUrl} target="_blank" rel="noopener" download>
+                          {resolveAttachmentName(a)}
+                        </a>
+                      </div>
+                    {:else}
+                      <a href={a.signedUrl} target="_blank" rel="noopener" download>
+                        {resolveAttachmentName(a)}
+                      </a>
+                    {/if}
                   {:else}
                     {resolveAttachmentName(a) || `Attachment ${a.id}`}
                   {/if}
