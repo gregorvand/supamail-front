@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { supabase } from '$lib/supabaseClient';
   import { authUser } from '$lib/authStore';
   import { attachmentsBucket } from '$lib/env';
@@ -33,6 +33,8 @@
   let messages = [];
   let loading = false;
   let error = '';
+  /** @type {import('@supabase/supabase-js').RealtimeChannel | null} */
+  let channel = null;
 
   /**
    * Pick the best display name provided by the record
@@ -117,13 +119,62 @@
     }
   }
 
-  onMount(() => {
-    if ($authUser) loadMessages();
+  onMount(async () => {
+    if ($authUser) {
+      await loadMessages();
+
+      // Ensure Realtime has a valid access token before subscribing
+      const { data } = await supabase.auth.getSession();
+      const accessToken = data.session?.access_token;
+      if (accessToken) {
+        try { await supabase.realtime.setAuth(accessToken); } catch {}
+      }
+
+      // Subscribe to Postgres changes on email_messages (RLS will scope rows)
+      channel = supabase.channel('email_messages:realtime');
+
+      channel
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'email_messages' }, async () => {
+          await loadMessages();
+        })
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'email_messages' }, async () => {
+          await loadMessages();
+        })
+        .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'email_messages' }, async () => {
+          await loadMessages();
+        })
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            // eslint-disable-next-line no-console
+            console.log('Subscribed to email_messages Postgres changes');
+          }
+        });
+    }
   });
 
-  $: if ($authUser) {
-    // Reload when auth becomes available
-    loadMessages();
+  onDestroy(() => {
+    if (channel) {
+      supabase.removeChannel(channel);
+      channel = null;
+    }
+  });
+
+  $: if ($authUser && !loading && !channel) {
+    // If auth arrives after mount, ensure data and subscription are initialized
+    (async () => {
+      await loadMessages();
+      const { data } = await supabase.auth.getSession();
+      const accessToken = data.session?.access_token;
+      if (accessToken) {
+        try { await supabase.realtime.setAuth(accessToken); } catch {}
+      }
+      channel = supabase.channel('email_messages:realtime');
+      channel
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'email_messages' }, async () => { await loadMessages(); })
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'email_messages' }, async () => { await loadMessages(); })
+        .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'email_messages' }, async () => { await loadMessages(); })
+        .subscribe();
+    })();
   }
 </script>
 
