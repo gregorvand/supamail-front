@@ -35,6 +35,8 @@
   let error = '';
   /** @type {import('@supabase/supabase-js').RealtimeChannel | null} */
   let channel = null;
+  /** @type {import('@supabase/supabase-js').RealtimeChannel | null} */
+  let broadcastChannel = null;
 
   /**
    * Pick the best display name provided by the record
@@ -119,6 +121,108 @@
     }
   }
 
+  /**
+   * Fetch a single message row by id, including its attachments and signed URLs.
+   * @param {string} messageId
+   */
+  async function fetchMessageWithAttachments(messageId) {
+    const { data: msg, error: mErr } = await supabase
+      .from('email_messages')
+      .select('*')
+      .eq('id', messageId)
+      .single();
+    if (mErr || !msg) return null;
+
+    const { data: atts } = await supabase
+      .from('email_attachments')
+      .select('*')
+      .eq('message_id', messageId);
+
+    /** @type {Message} */
+    const enriched = { ...msg, attachments: atts ?? [] };
+    await populateSignedUrls([enriched]);
+    return enriched;
+  }
+
+  /** @param {Message} m */
+  function upsertMessageInList(m) {
+    const idx = messages.findIndex((x) => x.id === m.id);
+    if (idx >= 0) {
+      messages[idx] = m;
+    } else {
+      messages.unshift(m);
+    }
+    messages = [...messages].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  }
+
+  /** @param {string} id */
+  function removeMessageFromList(id) {
+    messages = messages.filter((m) => m.id !== id);
+  }
+
+  /**
+   * Handle custom broadcast events where payload shape may vary.
+   * Falls back to reloading list if id cannot be derived.
+   * @param {'INSERT'|'UPDATE'|'DELETE'} evt
+   * @param {any} payload
+   */
+  async function handleBroadcast(evt, payload) {
+    try {
+      const idForInsert = payload?.new?.id ?? payload?.id ?? null;
+      const idForUpdate = payload?.new?.id ?? payload?.id ?? null;
+      const idForDelete = payload?.old?.id ?? payload?.id ?? null;
+      if (evt === 'INSERT') {
+        if (idForInsert) {
+          const m = await fetchMessageWithAttachments(idForInsert);
+          if (m) upsertMessageInList(m);
+          return;
+        }
+      } else if (evt === 'UPDATE') {
+        if (idForUpdate) {
+          const m = await fetchMessageWithAttachments(idForUpdate);
+          if (m) upsertMessageInList(m);
+          return;
+        }
+      } else if (evt === 'DELETE') {
+        if (idForDelete) {
+          removeMessageFromList(idForDelete);
+          return;
+        }
+      }
+      await loadMessages();
+    } catch {
+      await loadMessages();
+    }
+  }
+
+  /**
+   * Handle a Postgres change payload (INSERT/UPDATE/DELETE)
+   * @param {any} payload
+   */
+  async function handleRowChange(payload) {
+    const evt = payload?.eventType || payload?.event || '';
+    if (evt === 'INSERT') {
+      const id = payload?.new?.id;
+      if (!id) return;
+      const m = await fetchMessageWithAttachments(id);
+      if (m) upsertMessageInList(m);
+      return;
+    }
+    if (evt === 'UPDATE') {
+      const id = payload?.new?.id;
+      if (!id) return;
+      const m = await fetchMessageWithAttachments(id);
+      if (m) upsertMessageInList(m);
+      return;
+    }
+    if (evt === 'DELETE') {
+      const id = payload?.old?.id;
+      if (!id) return;
+      removeMessageFromList(id);
+      return;
+    }
+  }
+
   onMount(async () => {
     if ($authUser) {
       await loadMessages();
@@ -134,19 +238,30 @@
       channel = supabase.channel('email_messages:realtime');
 
       channel
-        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'email_messages' }, async () => {
-          await loadMessages();
-        })
-        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'email_messages' }, async () => {
-          await loadMessages();
-        })
-        .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'email_messages' }, async () => {
-          await loadMessages();
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'email_messages' }, async (payload) => {
+          // eslint-disable-next-line no-console
+          console.debug('email_messages change', payload?.eventType, payload);
+          await handleRowChange(payload);
         })
         .subscribe((status) => {
           if (status === 'SUBSCRIBED') {
             // eslint-disable-next-line no-console
             console.log('Subscribed to email_messages Postgres changes');
+          }
+        });
+
+      // Also subscribe to private broadcast channel if backend emits custom events
+      broadcastChannel = supabase.channel('email_messages:changes', {
+        config: { private: true, broadcast: { ack: true } }
+      });
+      broadcastChannel
+        .on('broadcast', { event: 'INSERT' }, async ({ payload }) => { await handleBroadcast('INSERT', payload); })
+        .on('broadcast', { event: 'UPDATE' }, async ({ payload }) => { await handleBroadcast('UPDATE', payload); })
+        .on('broadcast', { event: 'DELETE' }, async ({ payload }) => { await handleBroadcast('DELETE', payload); })
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            // eslint-disable-next-line no-console
+            console.log('Subscribed to email_messages broadcast channel');
           }
         });
     }
@@ -156,6 +271,10 @@
     if (channel) {
       supabase.removeChannel(channel);
       channel = null;
+    }
+    if (broadcastChannel) {
+      supabase.removeChannel(broadcastChannel);
+      broadcastChannel = null;
     }
   });
 
@@ -170,9 +289,21 @@
       }
       channel = supabase.channel('email_messages:realtime');
       channel
-        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'email_messages' }, async () => { await loadMessages(); })
-        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'email_messages' }, async () => { await loadMessages(); })
-        .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'email_messages' }, async () => { await loadMessages(); })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'email_messages' }, async (payload) => {
+          // eslint-disable-next-line no-console
+          console.debug('email_messages change', payload?.eventType, payload);
+          await handleRowChange(payload);
+        })
+        .subscribe();
+
+      // Private broadcast channel
+      broadcastChannel = supabase.channel('email_messages:changes', {
+        config: { private: true, broadcast: { ack: true } }
+      });
+      broadcastChannel
+        .on('broadcast', { event: 'INSERT' }, async ({ payload }) => { await handleBroadcast('INSERT', payload); })
+        .on('broadcast', { event: 'UPDATE' }, async ({ payload }) => { await handleBroadcast('UPDATE', payload); })
+        .on('broadcast', { event: 'DELETE' }, async ({ payload }) => { await handleBroadcast('DELETE', payload); })
         .subscribe();
     })();
   }
