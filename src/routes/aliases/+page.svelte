@@ -5,13 +5,16 @@
   import { aliasDomain } from '$lib/env';
 
   /**
-   * @typedef {{ id: string, address: string, created_at: string }} Alias
+   * @typedef {{ id: string, address: string, label?: string | null, created_at: string }} Alias
    */
 
   /** @type {Alias[]} */
   let aliases = [];
   let loading = false;
   let error = '';
+  /** @type {string | null} */
+  let editingAliasId = null;
+  let editingLabel = '';
 
   const MAX_RETRIES = 5;
 
@@ -24,13 +27,74 @@
     error = '';
     const { data, error: err } = await supabase
       .from('aliases')
-      .select('id,address,created_at')
+      .select('id,address,label,created_at')
       .order('created_at', { ascending: false });
     if (err) {
       error = err.message;
       return;
     }
     aliases = data ?? [];
+  }
+
+  /**
+   * @param {string} aliasId
+   * @param {string} newLabel
+   */
+  async function updateAliasLabel(aliasId, newLabel) {
+    try {
+      console.log('Updating alias label:', { aliasId, newLabel });
+      
+      const { data, error: updateError, count } = await supabase
+        .from('aliases')
+        .update({ label: newLabel || null })
+        .eq('id', aliasId)
+        .select();
+      
+      console.log('Update response:', { data, error: updateError, count });
+      
+      if (updateError) {
+        error = 'Failed to update label: ' + updateError.message;
+        console.error('Update error:', updateError);
+        return;
+      }
+      
+      if (!data || data.length === 0) {
+        error = 'No alias found with that ID. The alias may have been deleted.';
+        console.warn('No rows updated for alias ID:', aliasId);
+        return;
+      }
+      
+      await loadAliases();
+      editingAliasId = null;
+      editingLabel = '';
+      error = ''; // Clear any previous errors
+      
+      console.log('Label updated successfully');
+    } catch (e) {
+      error = 'Failed to update label: ' + String(e);
+      console.error('Exception during update:', e);
+    }
+  }
+
+  /**
+   * @param {string} aliasId
+   * @param {string | null} currentLabel
+   */
+  function startEditingLabel(aliasId, currentLabel) {
+    editingAliasId = aliasId;
+    editingLabel = currentLabel || '';
+  }
+
+  function cancelEditing() {
+    editingAliasId = null;
+    editingLabel = '';
+  }
+
+  /**
+   * @param {string} aliasId
+   */
+  async function saveLabel(aliasId) {
+    await updateAliasLabel(aliasId, editingLabel);
   }
 
   async function createAlias() {
@@ -88,9 +152,47 @@
   {#if aliases.length === 0}
     <p>No aliases yet.</p>
   {:else}
-    <ul>
+    <ul style="list-style: none; padding: 0;">
       {#each aliases as a}
-        <li>{a.address}</li>
+        <li style="margin-bottom: 1rem; padding: 1rem; border: 1px solid #ccc; border-radius: 8px;">
+          <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 200px;">
+              <div style="font-weight: bold; margin-bottom: 0.25rem;">
+                {a.address}
+              </div>
+              <div style="font-size: 0.85rem; color: #666;">
+                Created: {new Date(a.created_at).toLocaleDateString()}
+              </div>
+            </div>
+            
+            <div style="flex: 1; min-width: 200px; display: flex; align-items: center; gap: 0.5rem;">
+              {#if editingAliasId === a.id}
+                <input
+                  type="text"
+                  bind:value={editingLabel}
+                  placeholder="Enter label..."
+                  style="padding: 0.5rem; flex: 1;"
+                  on:keydown={(/** @type {KeyboardEvent} */ e) => {
+                    if (e.key === 'Enter') saveLabel(a.id);
+                    if (e.key === 'Escape') cancelEditing();
+                  }}
+                />
+                <button on:click={() => saveLabel(a.id)}>Save</button>
+                <button on:click={cancelEditing}>Cancel</button>
+              {:else}
+                <div style="flex: 1;">
+                  <strong>Label:</strong> {a.label || '(none)'}
+                </div>
+                <button 
+                  on:click={() => startEditingLabel(a.id, a.label || null)}
+                  style="white-space: nowrap;"
+                >
+                  {a.label ? 'Edit' : 'Add'} Label
+                </button>
+              {/if}
+            </div>
+          </div>
+        </li>
       {/each}
     </ul>
   {/if}

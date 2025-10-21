@@ -29,14 +29,38 @@
    * }} Attachment
    */
 
+  /**
+   * @typedef {{
+   *   id: string,
+   *   address: string,
+   *   label?: string | null,
+   * }} Alias
+   */
+
+  /**
+   * @typedef {{
+   *   alias: string,
+   *   label: string | null,
+   *   aliasId: string,
+   *   messages: Message[],
+   * }} GroupedMessages
+   */
+
   /** @type {Message[]} */
   let messages = [];
+  /** @type {Record<string, Alias>} */
+  let aliasesMap = {};
+  /** @type {GroupedMessages[]} */
+  let groupedMessages = [];
   let loading = false;
   let error = '';
   /** @type {import('@supabase/supabase-js').RealtimeChannel | null} */
   let channel = null;
   /** @type {import('@supabase/supabase-js').RealtimeChannel | null} */
   let broadcastChannel = null;
+  /** @type {string | null} */
+  let editingAliasId = null;
+  let editingLabel = '';
 
   /**
    * Pick the best display name provided by the record
@@ -90,10 +114,56 @@
     }
   }
 
+  async function loadAliases() {
+    const { data, error: err } = await supabase
+      .from('aliases')
+      .select('id, address, label');
+    if (err) {
+      console.error('Error loading aliases:', err);
+      return;
+    }
+    aliasesMap = {};
+    for (const alias of data ?? []) {
+      aliasesMap[alias.address] = alias;
+    }
+  }
+
+  function groupMessagesByAlias() {
+    /** @type {Record<string, GroupedMessages>} */
+    const groups = {};
+    
+    for (const msg of messages) {
+      for (const toAddr of msg.to_addresses || []) {
+        const alias = aliasesMap[toAddr];
+        if (alias) {
+          if (!groups[alias.address]) {
+            groups[alias.address] = {
+              alias: alias.address,
+              label: alias.label || null,
+              aliasId: alias.id,
+              messages: []
+            };
+          }
+          groups[alias.address].messages.push(msg);
+        }
+      }
+    }
+    
+    groupedMessages = Object.values(groups).sort((a, b) => {
+      // Sort by most recent message in each group
+      const aLatest = a.messages[0]?.created_at || '';
+      const bLatest = b.messages[0]?.created_at || '';
+      return new Date(bLatest).getTime() - new Date(aLatest).getTime();
+    });
+  }
+
   async function loadMessages() {
     error = '';
     loading = true;
     try {
+      // Load aliases first
+      await loadAliases();
+
       // RLS on email_messages.user_id ensures the user sees only their messages
       const { data, error: err } = await supabase
         .from('email_messages')
@@ -127,6 +197,7 @@
       await populateSignedUrls(baseMessages);
 
       messages = baseMessages;
+      groupMessagesByAlias();
     } finally {
       loading = false;
     }
@@ -164,11 +235,76 @@
       messages.unshift(m);
     }
     messages = [...messages].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    groupMessagesByAlias();
   }
 
   /** @param {string} id */
   function removeMessageFromList(id) {
     messages = messages.filter((m) => m.id !== id);
+    groupMessagesByAlias();
+  }
+
+  /**
+   * @param {string} aliasId
+   * @param {string} newLabel
+   */
+  async function updateAliasLabel(aliasId, newLabel) {
+    try {
+      console.log('Updating alias label:', { aliasId, newLabel });
+      
+      const { data, error: updateError, count } = await supabase
+        .from('aliases')
+        .update({ label: newLabel || null })
+        .eq('id', aliasId)
+        .select();
+      
+      console.log('Update response:', { data, error: updateError, count });
+      
+      if (updateError) {
+        error = 'Failed to update label: ' + updateError.message;
+        console.error('Update error:', updateError);
+        return;
+      }
+      
+      if (!data || data.length === 0) {
+        error = 'No alias found with that ID. The alias may have been deleted.';
+        console.warn('No rows updated for alias ID:', aliasId);
+        return;
+      }
+      
+      // Update local state
+      await loadAliases();
+      groupMessagesByAlias();
+      editingAliasId = null;
+      editingLabel = '';
+      error = ''; // Clear any previous errors
+      
+      console.log('Label updated successfully');
+    } catch (e) {
+      error = 'Failed to update label: ' + String(e);
+      console.error('Exception during update:', e);
+    }
+  }
+
+  /**
+   * @param {string} aliasId
+   * @param {string | null} currentLabel
+   */
+  function startEditingLabel(aliasId, currentLabel) {
+    editingAliasId = aliasId;
+    editingLabel = currentLabel || '';
+  }
+
+  function cancelEditing() {
+    editingAliasId = null;
+    editingLabel = '';
+  }
+
+  /**
+   * @param {string} aliasId
+   */
+  async function saveLabel(aliasId) {
+    await updateAliasLabel(aliasId, editingLabel);
   }
 
   /**
@@ -330,43 +466,80 @@
     <p style="color: red">{error}</p>
   {:else if messages.length === 0}
     <p>No messages yet.</p>
+  {:else if groupedMessages.length === 0}
+    <p>No messages found for your aliases.</p>
   {:else}
-    <ul>
-      {#each messages as m}
-        <li>
-          <strong>{m.subject || '(no subject)'}</strong>
-          <div>To: {m.to_addresses?.join(', ')}</div>
-          <div>From: {m.from_address}</div>
-          <div>Received: {new Date(m.created_at).toLocaleString()}</div>
-          {#if m.attachments && m.attachments.length > 0}
-            <div>Attachments ({m.attachments.length}):</div>
-            <ul>
-              {#each m.attachments as a}
-                <li>
-                  {#if a.signedUrl}
-                    {#if a.content_type?.startsWith('image/')}
-                      <div>
-                        <img src={a.signedUrl} alt={resolveAttachmentName(a)} style="max-width: 300px; max-height: 300px;" />
-                        <br>
-                        <a href={a.signedUrl} target="_blank" rel="noopener" download>
-                          {resolveAttachmentName(a)}
-                        </a>
-                      </div>
-                    {:else}
-                      <a href={a.signedUrl} target="_blank" rel="noopener" download>
-                        {resolveAttachmentName(a)}
-                      </a>
-                    {/if}
-                  {:else}
-                    {resolveAttachmentName(a) || `Attachment ${a.id}`}
-                  {/if}
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </li>
-      {/each}
-    </ul>
+    {#each groupedMessages as group}
+      <div style="margin-bottom: 2rem; border: 1px solid #ccc; padding: 1rem; border-radius: 8px;">
+        <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; background-color: #f5f5f5; padding: 0.5rem; border-radius: 4px;">
+          <h2 style="margin: 0; font-size: 1.2rem;">
+            {#if editingAliasId === group.aliasId}
+              <input
+                type="text"
+                bind:value={editingLabel}
+                placeholder="Enter label..."
+                style="padding: 0.25rem; font-size: 1rem;"
+                on:keydown={(/** @type {KeyboardEvent} */ e) => {
+                  if (e.key === 'Enter') saveLabel(group.aliasId);
+                  if (e.key === 'Escape') cancelEditing();
+                }}
+              />
+              <button on:click={() => saveLabel(group.aliasId)} style="margin-left: 0.5rem;">Save</button>
+              <button on:click={cancelEditing}>Cancel</button>
+            {:else}
+              <span style="font-weight: bold;">
+                {group.label || 'Unlabeled'}
+              </span>
+              <button 
+                on:click={() => startEditingLabel(group.aliasId, group.label)}
+                style="margin-left: 0.5rem; font-size: 0.8rem;"
+              >
+                {group.label ? 'Edit' : 'Add'} Label
+              </button>
+            {/if}
+          </h2>
+          <div style="color: #666; font-size: 0.9rem;">
+            {group.alias} ({group.messages.length} message{group.messages.length !== 1 ? 's' : ''})
+          </div>
+        </div>
+        
+        <ul style="list-style: none; padding: 0;">
+          {#each group.messages as m}
+            <li style="margin-bottom: 1.5rem; padding: 1rem; background-color: #fafafa; border-radius: 4px;">
+              <strong>{m.subject || '(no subject)'}</strong>
+              <div style="font-size: 0.9rem; color: #666;">From: {m.from_address}</div>
+              <div style="font-size: 0.9rem; color: #666;">Received: {new Date(m.created_at).toLocaleString()}</div>
+              {#if m.attachments && m.attachments.length > 0}
+                <div style="margin-top: 0.5rem;">Attachments ({m.attachments.length}):</div>
+                <ul style="margin-top: 0.5rem;">
+                  {#each m.attachments as a}
+                    <li style="margin-bottom: 0.5rem;">
+                      {#if a.signedUrl}
+                        {#if a.content_type?.startsWith('image/')}
+                          <div>
+                            <img src={a.signedUrl} alt={resolveAttachmentName(a)} style="max-width: 300px; max-height: 300px;" />
+                            <br>
+                            <a href={a.signedUrl} target="_blank" rel="noopener" download>
+                              {resolveAttachmentName(a)}
+                            </a>
+                          </div>
+                        {:else}
+                          <a href={a.signedUrl} target="_blank" rel="noopener" download>
+                            {resolveAttachmentName(a)}
+                          </a>
+                        {/if}
+                      {:else}
+                        {resolveAttachmentName(a) || `Attachment ${a.id}`}
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/each}
   {/if}
 {/if}
 
