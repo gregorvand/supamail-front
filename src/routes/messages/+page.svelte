@@ -58,6 +58,8 @@
   let channel = null;
   /** @type {import('@supabase/supabase-js').RealtimeChannel | null} */
   let broadcastChannel = null;
+  /** @type {import('@supabase/supabase-js').RealtimeChannel | null} */
+  let attachmentsChannel = null;
   /** @type {string | null} */
   let editingAliasId = null;
   let editingLabel = '';
@@ -411,6 +413,25 @@
             console.log('Subscribed to email_messages broadcast channel');
           }
         });
+
+      // Subscribe to postgres changes on email_attachments for delayed uploads
+      attachmentsChannel = supabase.channel('email_attachments:realtime');
+      attachmentsChannel
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'email_attachments' }, async (payload) => {
+          // eslint-disable-next-line no-console
+          console.debug('email_attachments change', payload?.eventType, payload);
+          const messageId = payload?.new?.message_id || payload?.old?.message_id;
+          if (messageId) {
+            const m = await fetchMessageWithAttachments(messageId);
+            if (m) upsertMessageInList(m);
+          }
+        })
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            // eslint-disable-next-line no-console
+            console.log('Subscribed to email_attachments postgres changes');
+          }
+        });
     }
   });
 
@@ -422,6 +443,10 @@
     if (broadcastChannel) {
       supabase.removeChannel(broadcastChannel);
       broadcastChannel = null;
+    }
+    if (attachmentsChannel) {
+      supabase.removeChannel(attachmentsChannel);
+      attachmentsChannel = null;
     }
   });
 
@@ -451,6 +476,20 @@
         .on('broadcast', { event: 'INSERT' }, async ({ payload }) => { await handleBroadcast('INSERT', payload); })
         .on('broadcast', { event: 'UPDATE' }, async ({ payload }) => { await handleBroadcast('UPDATE', payload); })
         .on('broadcast', { event: 'DELETE' }, async ({ payload }) => { await handleBroadcast('DELETE', payload); })
+        .subscribe();
+
+      // Postgres changes on email_attachments
+      attachmentsChannel = supabase.channel('email_attachments:realtime');
+      attachmentsChannel
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'email_attachments' }, async (payload) => {
+          // eslint-disable-next-line no-console
+          console.debug('email_attachments change', payload?.eventType, payload);
+          const messageId = payload?.new?.message_id || payload?.old?.message_id;
+          if (messageId) {
+            const m = await fetchMessageWithAttachments(messageId);
+            if (m) upsertMessageInList(m);
+          }
+        })
         .subscribe();
     })();
   }
