@@ -28,6 +28,7 @@
    *   content_type?: string | null,
    *   size_bytes?: number | null,
    *   signedUrl?: string | null,
+   *   thumbnailUrl?: string | null,
    * }} Attachment
    */
 
@@ -91,14 +92,23 @@
   }
 
   /**
+   * Check if a content type is an image
+   * @param {string | null | undefined} contentType
+   */
+  function isImage(contentType) {
+    return contentType?.startsWith('image/') ?? false;
+  }
+
+  /**
    * For each message, attempt to locate its attachments in the storage bucket
    * under a folder named by the message id, and create signed download URLs.
+   * For images, create both full-size and thumbnail URLs.
    * Batches all requests for better performance.
    * @param {Message[]} msgs
    */
   async function populateSignedUrls(msgs) {
     // Collect all paths that need signed URLs
-    /** @type {Array<{message: Message, attachment: Attachment, path: string}>} */
+    /** @type {Array<{message: Message, attachment: Attachment, path: string, isImage: boolean}>} */
     const pathsToSign = [];
 
     for (const m of msgs) {
@@ -111,24 +121,65 @@
         const name = resolveAttachmentName(a);
         if (!name) continue;
         const objectPath = `${folder}/${name}`;
-        pathsToSign.push({ message: m, attachment: a, path: objectPath });
+        pathsToSign.push({ 
+          message: m, 
+          attachment: a, 
+          path: objectPath,
+          isImage: isImage(a.content_type)
+        });
       }
     }
 
-    // Create signed URLs in parallel batches of 20 to avoid overwhelming the API
+    // For images, create both full-size signed URL and thumbnail with transform
+    // For non-images, create signed URLs
     const batchSize = 20;
     for (let i = 0; i < pathsToSign.length; i += batchSize) {
       const batch = pathsToSign.slice(i, i + batchSize);
       const results = await Promise.allSettled(
-        batch.map(({ path }) =>
-          supabase.storage.from(attachmentsBucket).createSignedUrl(path, 3600)
-        )
+        batch.map(async ({ path, isImage }) => {
+          if (isImage) {
+            // For images, get both full-size and thumbnail
+            const [fullSizeResult, thumbnailResult] = await Promise.allSettled([
+              // Full-size signed URL for opening in browser
+              supabase.storage.from(attachmentsBucket).createSignedUrl(path, 3600),
+              // Thumbnail with transform for display
+              supabase.storage.from(attachmentsBucket).download(path, {
+                transform: {
+                  width: 300,
+                  resize: 'contain'
+                }
+              })
+            ]);
+            
+            let fullSizeUrl = null;
+            let thumbnailUrl = null;
+            
+            if (fullSizeResult.status === 'fulfilled' && fullSizeResult.value.data?.signedUrl) {
+              fullSizeUrl = fullSizeResult.value.data.signedUrl;
+            }
+            
+            if (thumbnailResult.status === 'fulfilled' && thumbnailResult.value.data) {
+              thumbnailUrl = URL.createObjectURL(thumbnailResult.value.data);
+            }
+            
+            return { data: { signedUrl: fullSizeUrl, thumbnailUrl } };
+          } else {
+            // For non-images, use createSignedUrl
+            return supabase.storage.from(attachmentsBucket).createSignedUrl(path, 3600);
+          }
+        })
       );
 
-      // Assign the signed URLs back to the attachments
+      // Assign the URLs back to the attachments
       results.forEach((result, idx) => {
-        if (result.status === 'fulfilled' && result.value.data?.signedUrl) {
-          batch[idx].attachment.signedUrl = result.value.data.signedUrl;
+        if (result.status === 'fulfilled' && result.value.data) {
+          const { signedUrl, thumbnailUrl } = result.value.data;
+          if (signedUrl) {
+            batch[idx].attachment.signedUrl = signedUrl;
+          }
+          if (thumbnailUrl) {
+            batch[idx].attachment.thumbnailUrl = thumbnailUrl;
+          }
         }
       });
     }
@@ -541,7 +592,7 @@
     {#if !$authUser}
       <p>Please sign in to view your messages.</p>
     {:else}
-      <h1>Your messages</h1>
+      <h1 class="mb-4">Your messages</h1>
       {#if loading}
         <p>Loading…</p>
       {:else if error}
@@ -622,10 +673,11 @@
                           {#if a.signedUrl}
                             {#if a.content_type?.startsWith('image/')}
                               <div>
-                                <img src={a.signedUrl} alt={resolveAttachmentName(a)} style="max-width: 300px; max-height: 300px;" />
+                                <img src={a.thumbnailUrl || a.signedUrl} alt={resolveAttachmentName(a)} style="max-width: 300px; max-height: 300px;" />
                                 <br>
-                                <a href={a.signedUrl} target="_blank" rel="noopener" download>
-                                  {resolveAttachmentName(a)}
+                                <a href={a.signedUrl} target="_blank" rel="noopener">
+                                  {resolveAttachmentName(a)} <br>
+                                  <span class="text-xs text-gray-500">(open full size image in new tab)</span>
                                 </a>
                               </div>
                             {:else}
