@@ -29,13 +29,15 @@
   }
 </script>
 
-<h1>Sign in</h1>
+<h1 class="text-2xl font-bold mb-2">Sign in / Sign up</h1>
 
 <form on:submit|preventDefault={submit}>
   <label>
     Email
-    <input type="email" class="mt-2 w-[200px] relative inline-block" bind:value={email} required />
+    <br>
+    <input type="email" class="mt-2 max-w-md relative inline-block" bind:value={email} required />
   </label>
+  <br>
   <button class="btn-primary p-2 rounded-lg mt-2" type="submit" disabled={loading || !email}>
     {loading ? 'Sending…' : 'Send magic link'}
   </button>

@@ -66,7 +66,7 @@
 						</div>
 					{:else}
 						<a href="/signin" class="btn-primary p-2 rounded-lg">
-							Sign in
+							Sign in / Sign up
 						</a>
 					{/if}
 				</div>
