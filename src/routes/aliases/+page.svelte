@@ -142,7 +142,7 @@
 {#if !$authUser}
   <p>Please sign in to manage your aliases.</p>
 {:else}
-  <h1>Your aliases</h1>
+  <h1 class="mb-4">Your aliases</h1>
   <button on:click={createAlias} disabled={loading}>
     {loading ? 'Creating…' : 'Generate new alias'}
   </button>

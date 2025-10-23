@@ -34,9 +34,9 @@
 <form on:submit|preventDefault={submit}>
   <label>
     Email
-    <input type="email" bind:value={email} required />
+    <input type="email" class="mt-2 w-[200px] relative inline-block" bind:value={email} required />
   </label>
-  <button type="submit" disabled={loading || !email}>
+  <button class="btn-primary p-2 rounded-lg mt-2" type="submit" disabled={loading || !email}>
     {loading ? 'Sending…' : 'Send magic link'}
   </button>
 </form>

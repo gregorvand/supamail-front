@@ -12,6 +12,8 @@
    *   to_addresses: string[],
    *   from_address?: string | null,
    *   created_at: string,
+   *   text_body?: string | null,
+   *   html_body?: string | null,
    *   attachments?: Attachment[],
    * }} Message
    */
@@ -26,6 +28,7 @@
    *   content_type?: string | null,
    *   size_bytes?: number | null,
    *   signedUrl?: string | null,
+   *   thumbnailUrl?: string | null,
    * }} Attachment
    */
 
@@ -63,6 +66,10 @@
   /** @type {string | null} */
   let editingAliasId = null;
   let editingLabel = '';
+  /** @type {Set<string>} */
+  let expandedAliases = new Set();
+  /** @type {Message | null} */
+  let selectedHtmlMessage = null;
 
   /**
    * Pick the best display name provided by the record
@@ -73,14 +80,35 @@
   }
 
   /**
+   * Check if a message has meaningful content
+   * @param {Message} m
+   */
+  function hasContent(m) {
+    const hasTextContent = m.text_body && m.text_body.trim() !== '';
+    const hasHtmlContent = m.html_body && 
+      m.html_body.trim() !== '' && 
+      m.html_body.trim() !== '<div dir="ltr"><br></div>';
+    return hasTextContent || hasHtmlContent;
+  }
+
+  /**
+   * Check if a content type is an image
+   * @param {string | null | undefined} contentType
+   */
+  function isImage(contentType) {
+    return contentType?.startsWith('image/') ?? false;
+  }
+
+  /**
    * For each message, attempt to locate its attachments in the storage bucket
    * under a folder named by the message id, and create signed download URLs.
+   * For images, create both full-size and thumbnail URLs.
    * Batches all requests for better performance.
    * @param {Message[]} msgs
    */
   async function populateSignedUrls(msgs) {
     // Collect all paths that need signed URLs
-    /** @type {Array<{message: Message, attachment: Attachment, path: string}>} */
+    /** @type {Array<{message: Message, attachment: Attachment, path: string, isImage: boolean}>} */
     const pathsToSign = [];
 
     for (const m of msgs) {
@@ -93,24 +121,65 @@
         const name = resolveAttachmentName(a);
         if (!name) continue;
         const objectPath = `${folder}/${name}`;
-        pathsToSign.push({ message: m, attachment: a, path: objectPath });
+        pathsToSign.push({ 
+          message: m, 
+          attachment: a, 
+          path: objectPath,
+          isImage: isImage(a.content_type)
+        });
       }
     }
 
-    // Create signed URLs in parallel batches of 20 to avoid overwhelming the API
+    // For images, create both full-size signed URL and thumbnail with transform
+    // For non-images, create signed URLs
     const batchSize = 20;
     for (let i = 0; i < pathsToSign.length; i += batchSize) {
       const batch = pathsToSign.slice(i, i + batchSize);
       const results = await Promise.allSettled(
-        batch.map(({ path }) =>
-          supabase.storage.from(attachmentsBucket).createSignedUrl(path, 3600)
-        )
+        batch.map(async ({ path, isImage }) => {
+          if (isImage) {
+            // For images, get both full-size and thumbnail
+            const [fullSizeResult, thumbnailResult] = await Promise.allSettled([
+              // Full-size signed URL for opening in browser
+              supabase.storage.from(attachmentsBucket).createSignedUrl(path, 3600),
+              // Thumbnail with transform for display
+              supabase.storage.from(attachmentsBucket).download(path, {
+                transform: {
+                  width: 300,
+                  resize: 'contain'
+                }
+              })
+            ]);
+            
+            let fullSizeUrl = null;
+            let thumbnailUrl = null;
+            
+            if (fullSizeResult.status === 'fulfilled' && fullSizeResult.value.data?.signedUrl) {
+              fullSizeUrl = fullSizeResult.value.data.signedUrl;
+            }
+            
+            if (thumbnailResult.status === 'fulfilled' && thumbnailResult.value.data) {
+              thumbnailUrl = URL.createObjectURL(thumbnailResult.value.data);
+            }
+            
+            return { data: { signedUrl: fullSizeUrl, thumbnailUrl } };
+          } else {
+            // For non-images, use createSignedUrl
+            return supabase.storage.from(attachmentsBucket).createSignedUrl(path, 3600);
+          }
+        })
       );
 
-      // Assign the signed URLs back to the attachments
+      // Assign the URLs back to the attachments
       results.forEach((result, idx) => {
-        if (result.status === 'fulfilled' && result.value.data?.signedUrl) {
-          batch[idx].attachment.signedUrl = result.value.data.signedUrl;
+        if (result.status === 'fulfilled' && result.value.data) {
+          const { signedUrl, thumbnailUrl } = result.value.data;
+          if (signedUrl) {
+            batch[idx].attachment.signedUrl = signedUrl;
+          }
+          if (thumbnailUrl) {
+            batch[idx].attachment.thumbnailUrl = thumbnailUrl;
+          }
         }
       });
     }
@@ -310,6 +379,29 @@
   }
 
   /**
+   * @param {string} aliasId
+   */
+  function toggleExpanded(aliasId) {
+    if (expandedAliases.has(aliasId)) {
+      expandedAliases.delete(aliasId);
+    } else {
+      expandedAliases.add(aliasId);
+    }
+    expandedAliases = expandedAliases;
+  }
+
+  /**
+   * @param {Message} message
+   */
+  function openHtmlSidebar(message) {
+    selectedHtmlMessage = message;
+  }
+
+  function closeHtmlSidebar() {
+    selectedHtmlMessage = null;
+  }
+
+  /**
    * Handle custom broadcast events where payload shape may vary.
    * Falls back to reloading list if id cannot be derived.
    * @param {'INSERT'|'UPDATE'|'DELETE'} evt
@@ -495,91 +587,156 @@
   }
 </script>
 
-{#if !$authUser}
-  <p>Please sign in to view your messages.</p>
-{:else}
-  <h1>Your messages</h1>
-  {#if loading}
-    <p>Loading…</p>
-  {:else if error}
-    <p style="color: red">{error}</p>
-  {:else if messages.length === 0}
-    <p>No messages yet.</p>
-  {:else if groupedMessages.length === 0}
-    <p>No messages found for your aliases.</p>
-  {:else}
-    {#each groupedMessages as group}
-      <div style="margin-bottom: 2rem; border: 1px solid #ccc; padding: 1rem; border-radius: 8px;">
-        <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; background-color: #f5f5f5; padding: 0.5rem; border-radius: 4px;">
-          <h2 style="margin: 0; font-size: 1.2rem;">
-            {#if editingAliasId === group.aliasId}
-              <input
-                type="text"
-                bind:value={editingLabel}
-                placeholder="Enter label..."
-                style="padding: 0.25rem; font-size: 1rem;"
-                on:keydown={(/** @type {KeyboardEvent} */ e) => {
-                  if (e.key === 'Enter') saveLabel(group.aliasId);
-                  if (e.key === 'Escape') cancelEditing();
-                }}
-              />
-              <button on:click={() => saveLabel(group.aliasId)} style="margin-left: 0.5rem;">Save</button>
-              <button on:click={cancelEditing}>Cancel</button>
-            {:else}
-              <span style="font-weight: bold;">
-                {group.label || 'Unlabeled'}
-              </span>
-              <button 
-                on:click={() => startEditingLabel(group.aliasId, group.label)}
-                style="margin-left: 0.5rem; font-size: 0.8rem;"
+<div style="display: flex; gap: 1rem; position: relative;">
+  <div style="flex: 1; max-width: {selectedHtmlMessage ? '60%' : '100%'}; transition: max-width 0.3s ease;">
+    {#if !$authUser}
+      <p>Please sign in to view your messages.</p>
+    {:else}
+      <h1 class="mb-4">Your messages</h1>
+      {#if loading}
+        <p>Loading…</p>
+      {:else if error}
+        <p style="color: red">{error}</p>
+      {:else if messages.length === 0}
+        <p>No messages yet.</p>
+      {:else if groupedMessages.length === 0}
+        <p>No messages found for your aliases.</p>
+      {:else}
+        {#each groupedMessages as group}
+          <div style="margin-bottom: 2rem; border: 1px solid #ccc; padding: 1rem; border-radius: 8px;">
+            <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; background-color: #f5f5f5; padding: 0.5rem; border-radius: 4px;">
+              <h2 style="margin: 0; font-size: 1.2rem;">
+                {#if editingAliasId === group.aliasId}
+                  <input
+                    type="text"
+                    bind:value={editingLabel}
+                    placeholder="Enter label..."
+                    style="padding: 0.25rem; font-size: 1rem;"
+                    on:keydown={(/** @type {KeyboardEvent} */ e) => {
+                      if (e.key === 'Enter') saveLabel(group.aliasId);
+                      if (e.key === 'Escape') cancelEditing();
+                    }}
+                  />
+                  <button on:click={() => saveLabel(group.aliasId)} style="margin-left: 0.5rem;">Save</button>
+                  <button on:click={cancelEditing}>Cancel</button>
+                {:else}
+                  <span style="font-weight: bold;">
+                    {group.label || 'Unlabeled'}
+                  </span>
+                  <button 
+                    on:click={() => startEditingLabel(group.aliasId, group.label)}
+                    style="margin-left: 0.5rem; font-size: 0.8rem;"
+                  >
+                    {group.label ? 'Edit' : 'Add'} Label
+                  </button>
+                {/if}
+              </h2>
+              <div style="color: #666; font-size: 0.9rem;">
+                {group.alias} ({group.messages.length} message{group.messages.length !== 1 ? 's' : ''})
+              </div>
+            </div>
+            
+            <ul style="list-style: none; padding: 0;">
+              {#each group.messages.slice(0, expandedAliases.has(group.aliasId) ? group.messages.length : 2) as m}
+                <li style="margin-bottom: 1.5rem; padding: 1rem; background-color: #fafafa; border-radius: 4px;">
+                  <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 0.5rem;">
+                    <strong>{m.subject || '(no subject)'}</strong>
+                    {#if m.html_body && m.html_body.trim() !== '' && m.html_body.trim() !== '<div dir="ltr"><br></div>'}
+                      <button
+                        on:click={() => openHtmlSidebar(m)}
+                        style="padding: 0.25rem 0.5rem; font-size: 0.8rem; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;"
+                      >
+                        View HTML
+                      </button>
+                    {/if}
+                  </div>
+                  <div style="font-size: 0.9rem; color: #666;">From: {m.from_address}</div>
+                  <div style="font-size: 0.9rem; color: #666;">Received: {new Date(m.created_at).toLocaleString()}</div>
+                  
+                  <div style="margin-top: 1rem; padding: 0.75rem; background-color: white; border: 1px solid #e0e0e0; border-radius: 4px; font-size: 0.85rem; max-height: 300px; overflow-y: auto;">
+                    {#if hasContent(m)}
+                      <div style="white-space: pre-wrap; font-family: monospace;">
+                        {m.text_body}
+                      </div>
+                    {:else}
+                      <div style="color: #999; font-style: italic;">
+                        No text content available
+                      </div>
+                    {/if}
+                  </div>
+
+                  {#if m.attachments && m.attachments.length > 0}
+                    <div style="margin-top: 0.5rem;">Attachments ({m.attachments.length}):</div>
+                    <ul style="margin-top: 0.5rem;">
+                      {#each m.attachments as a}
+                        <li style="margin-bottom: 0.5rem;">
+                          {#if a.signedUrl}
+                            {#if a.content_type?.startsWith('image/')}
+                              <div>
+                                <img src={a.thumbnailUrl || a.signedUrl} alt={resolveAttachmentName(a)} style="max-width: 300px; max-height: 300px;" />
+                                <br>
+                                <a href={a.signedUrl} target="_blank" rel="noopener">
+                                  {resolveAttachmentName(a)} <br>
+                                  <span class="text-xs text-gray-500">(open full size image in new tab)</span>
+                                </a>
+                              </div>
+                            {:else}
+                              <a href={a.signedUrl} target="_blank" rel="noopener" download>
+                                {resolveAttachmentName(a)}
+                              </a>
+                            {/if}
+                          {:else}
+                            {resolveAttachmentName(a) || `Attachment ${a.id}`}
+                          {/if}
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+            
+            {#if group.messages.length > 2}
+              <button
+                on:click={() => toggleExpanded(group.aliasId)}
+                style="padding: 0.5rem 1rem; font-size: 0.9rem; background-color: #e0e0e0; border: none; border-radius: 4px; cursor: pointer; width: 100%;"
               >
-                {group.label ? 'Edit' : 'Add'} Label
+                {expandedAliases.has(group.aliasId) 
+                  ? 'Show less messages' 
+                  : `Show more messages (${group.messages.length - 2} more)`}
               </button>
             {/if}
-          </h2>
-          <div style="color: #666; font-size: 0.9rem;">
-            {group.alias} ({group.messages.length} message{group.messages.length !== 1 ? 's' : ''})
           </div>
-        </div>
-        
-        <ul style="list-style: none; padding: 0;">
-          {#each group.messages as m}
-            <li style="margin-bottom: 1.5rem; padding: 1rem; background-color: #fafafa; border-radius: 4px;">
-              <strong>{m.subject || '(no subject)'}</strong>
-              <div style="font-size: 0.9rem; color: #666;">From: {m.from_address}</div>
-              <div style="font-size: 0.9rem; color: #666;">Received: {new Date(m.created_at).toLocaleString()}</div>
-              {#if m.attachments && m.attachments.length > 0}
-                <div style="margin-top: 0.5rem;">Attachments ({m.attachments.length}):</div>
-                <ul style="margin-top: 0.5rem;">
-                  {#each m.attachments as a}
-                    <li style="margin-bottom: 0.5rem;">
-                      {#if a.signedUrl}
-                        {#if a.content_type?.startsWith('image/')}
-                          <div>
-                            <img src={a.signedUrl} alt={resolveAttachmentName(a)} style="max-width: 300px; max-height: 300px;" />
-                            <br>
-                            <a href={a.signedUrl} target="_blank" rel="noopener" download>
-                              {resolveAttachmentName(a)}
-                            </a>
-                          </div>
-                        {:else}
-                          <a href={a.signedUrl} target="_blank" rel="noopener" download>
-                            {resolveAttachmentName(a)}
-                          </a>
-                        {/if}
-                      {:else}
-                        {resolveAttachmentName(a) || `Attachment ${a.id}`}
-                      {/if}
-                    </li>
-                  {/each}
-                </ul>
-              {/if}
-            </li>
-          {/each}
-        </ul>
+        {/each}
+      {/if}
+    {/if}
+  </div>
+  
+  {#if selectedHtmlMessage}
+    <div style="position: fixed; right: 0; top: 0; width: 40%; height: 100vh; background-color: white; border-left: 2px solid #ccc; overflow-y: auto; padding: 1rem; box-shadow: -2px 0 10px rgba(0,0,0,0.1); z-index: 1000;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 2px solid #e0e0e0;">
+        <h3 style="margin: 0;">{selectedHtmlMessage.subject || '(no subject)'}</h3>
+        <button
+          on:click={closeHtmlSidebar}
+          style="padding: 0.5rem 1rem; background-color: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem;"
+        >
+          Close
+        </button>
       </div>
-    {/each}
+      <div style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+        From: {selectedHtmlMessage.from_address}
+      </div>
+      <div style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+        Received: {new Date(selectedHtmlMessage.created_at).toLocaleString()}
+      </div>
+      <iframe
+        title="Email HTML content"
+        srcdoc={selectedHtmlMessage.html_body || ''}
+        style="width: 100%; min-height: 600px; border: 1px solid #e0e0e0; border-radius: 4px; background-color: white;"
+        sandbox="allow-same-origin"
+      />
+    </div>
   {/if}
-{/if}
+</div>
 
 
