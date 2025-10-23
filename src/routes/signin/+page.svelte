@@ -36,7 +36,7 @@
     Email
     <input type="email" class="mt-2 w-[200px] relative inline-block" bind:value={email} required />
   </label>
-  <button class="btn-primary p-2 rounded-lg mt-2" type="submit" disabled={loading || !email}>
+  <button class="btn-primary p-2 rounded-lg mt-2" type="submit">
     {loading ? 'Sending…' : 'Send magic link'}
   </button>
 </form>
