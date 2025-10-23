@@ -71,9 +71,6 @@
 					<a href="/signin" class="btn-primary text-lg px-8 py-3">
 						Get Started
 					</a>
-					<a href="/about" class="btn-secondary text-lg px-8 py-3">
-						Learn More
-					</a>
 				</div>
 			</div>
 

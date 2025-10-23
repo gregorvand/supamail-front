@@ -19,10 +19,17 @@
 		<nav class="container py-4">
 			<div class="flex items-center justify-between">
 				<!-- Logo/Brand -->
-				<a href="/" class="flex items-center gap-2 text-xl font-bold text-gray-900 hover:text-blue-600 transition-colors">
-					<svg class="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
-					</svg>
+				<a href="/" class="flex items-center gap-2 text-xl font-bold text-gray-900 hover:text-emerald-600 transition-colors">
+					<div class="relative w-8 h-8">
+						<!-- Mail icon in black -->
+						<svg class="w-8 h-8 text-gray-900" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
+						</svg>
+						<!-- Lightning bolt overlay in Supabase green -->
+						<svg class="w-4 h-4 text-emerald-500 absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2" fill="currentColor" viewBox="0 0 20 20">
+							<path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"></path>
+						</svg>
+					</div>
 					<span>Supamail</span>
 				</a>
 
@@ -58,7 +65,7 @@
 							</button>
 						</div>
 					{:else}
-						<a href="/signin" class="btn-primary">
+						<a href="/signin" class="btn-primary p-2 rounded-lg">
 							Sign in
 						</a>
 					{/if}
